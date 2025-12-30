@@ -9,6 +9,12 @@
     "dev": "ts-node src/index.ts"
   },
   "dependencies": {
+    "@coinbase/x402": "^2.1.0",
+    "@x402/core": "^2.1.0",
+    "@x402/evm": "^2.1.0",
+    "@x402/express": "^2.1.0",
+    "@x402/paywall": "^2.1.0",
+    "@x402/svm": "^2.1.0",
     "dotenv": "^16.6.1",
     "express": "^5.2.1",
     "openai": "^6.15.0",
