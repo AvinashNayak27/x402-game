@@ -1,28 +1,37 @@
-import { mnemonicToAccount } from "viem/accounts";
 import dotenv from "dotenv";
 import express, { Request, Response } from "express";
-import { verifyMessage } from "viem/utils";
+import cors from "cors";
 import OpenAI from "openai";
+import { mnemonicToAccount } from "viem/accounts";
+import { verifyMessage } from "viem/utils";
+import { createPublicClient, createWalletClient, http,erc20Abi } from "viem";
+import { base } from "viem/chains";
+
 import { paymentMiddleware } from "@x402/express";
 import { x402ResourceServer, HTTPFacilitatorClient } from "@x402/core/server";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { createPaywall } from "@x402/paywall";
 import { evmPaywall } from "@x402/paywall/evm";
-import {facilitator} from "@coinbase/x402"
-
+import { facilitator } from "@coinbase/x402";
 
 dotenv.config();
 
 const app = express();
 app.use(express.json());
-
+app.use(
+  cors({
+    exposedHeaders: ["Payment-Required"],
+  })
+);
 const payTo = "0xAD7c065112dCF8891b10F8e70eF74F5E4A168Fa4"; // DEV ADDRESS
 
 // Create facilitator client (testnet)
 const facilitatorClient = new HTTPFacilitatorClient(facilitator);
 
-const server = new x402ResourceServer(facilitatorClient)
-  .register("eip155:8453", new ExactEvmScheme()); // Base on mainnet
+const server = new x402ResourceServer(facilitatorClient).register(
+  "eip155:8453",
+  new ExactEvmScheme()
+); // Base on mainnet
 
 // Create paywall instance
 const paywall = createPaywall()
@@ -61,15 +70,14 @@ app.use((req, res, next) => {
 
     if (
       indices.length < 2 ||
-      indices.length > 23 ||
-      indices.some((i) => isNaN(i) || i < 0 || i > 23)
+      indices.length > 24 ||
+      indices.some((i) => isNaN(i) || i < 0 || i > 24)
     ) {
       return res.status(400).json({
         error:
-          "Invalid idx format. Expected 2-23 unique numbers in range 0-23 (e.g., idx=1,2 or idx=1,2,3,4,5)",
+          "Invalid idx format. Expected 2-24 unique numbers in range 0-23 (e.g., idx=1,2 or idx=1,2,3,4,5)",
       });
     }
-    
 
     const pricing_dict: Record<number, number> = {
       2: 7,
@@ -94,7 +102,7 @@ app.use((req, res, next) => {
       21: 0.3,
       22: 0.2,
       23: 0.1,
-      24: 0,
+      24: 0.05,
     };
 
     const price = pricing_dict[indices.length];
@@ -112,7 +120,7 @@ app.use((req, res, next) => {
           ],
           description:
             "Generate an image combining the words at the specified indices",
-          mimeType: "image/png",
+          mimeType: "application/json",
           resource: `${req.protocol}://${req.headers.host}${req.originalUrl}`, // Include full URL with query params
         },
       },
@@ -125,12 +133,35 @@ app.use((req, res, next) => {
   next();
 });
 
-const port = process.env.PORT || 3000;
+const port = process.env.APP_PORT || 3000;
 const mnemonic = process.env.MNEMONIC;
 
 if (!mnemonic) {
   throw new Error("MNEMONIC environment variable is not set");
 }
+
+const walletClient = createWalletClient({
+  chain: base,
+  transport: http(),
+  account: mnemonicToAccount(mnemonic),
+});
+
+const publicClient = createPublicClient({
+  chain: base,
+  transport: http(),
+});
+
+const usdcAddress = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+
+const getUSDCBalance = async (address: `0x${string}`): Promise<bigint> => {
+  const balance = await publicClient.readContract({
+    address: usdcAddress as `0x${string}`,
+    abi: erc20Abi,
+    functionName: "balanceOf",
+    args: [address],
+  });
+  return balance as bigint;
+};
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -216,12 +247,12 @@ app.get("/image", async (req: Request, res: Response) => {
 
     if (
       indices.length < 2 ||
-      indices.length > 23 ||
+      indices.length > 24 ||
       indices.some((i) => isNaN(i) || i < 0 || i > 23)
     ) {
       return res.status(400).json({
         error:
-          "Invalid idx format. Expected 2-23 unique numbers in range 0-23 (e.g., idx=1,2 or idx=1,2,3,4,5)",
+          "Invalid idx format. Expected 2-24 unique numbers in range 0-23 (e.g., idx=1,2 or idx=1,2,3,4,5)",
       });
     }
 
@@ -249,7 +280,7 @@ app.get("/image", async (req: Request, res: Response) => {
     const response = await openai.responses.create({
       model: "gpt-5-mini",
       input: prompt,
-      tools: [{ type: "image_generation" }],
+      tools: [{ type: "image_generation", output_format: "jpeg" }],
     });
 
     const imageData = response.output
@@ -264,13 +295,12 @@ app.get("/image", async (req: Request, res: Response) => {
     }
 
     const imageBase64 = imageData[0];
-    const imageBuffer = Buffer.from(imageBase64, "base64");
 
-    console.log(`Image generated for indices: ${indices.join(", ")}`);
-
-    // Return image as PNG
-    res.setHeader("Content-Type", "image/png");
-    res.send(imageBuffer);
+    // Return image as base64
+    return res.status(200).json({
+      base64: imageBase64,
+      indices: indices,
+    });
   } catch (error) {
     console.error("Error in /image route:", error);
     res.status(500).json({
@@ -278,6 +308,53 @@ app.get("/image", async (req: Request, res: Response) => {
       details: (error as Error).message,
     });
   }
+});
+
+app.get("/withdraw", async (req: Request, res: Response) => {
+  try {
+    // Check if current timestamp is greater than Jan 31 2026 12:00 GMT
+    const withdrawalDate = new Date("2026-01-31T12:00:00.000Z");
+    const currentDate = new Date();
+
+    if (currentDate <= withdrawalDate) {
+      return res.status(403).json({
+        error: "Withdrawal not available yet",
+        availableAfter: withdrawalDate.toISOString(),
+      });
+    }
+
+    // Derive wallet from mnemonic
+    const wallet = mnemonicToAccount(mnemonic);
+    const balance = await getUSDCBalance(wallet.address);
+
+    if (balance === 0n) {
+      return res.status(400).json({ error: "No USDC balance to withdraw" });
+    }
+
+    try {
+      const hash = await walletClient.writeContract({
+        address: usdcAddress,
+        abi: erc20Abi,
+        functionName: "transfer",
+        args: [payTo, balance],
+      });
+
+      return res.status(200).json({
+        hash: hash as `0x${string}`,
+      });
+    } catch (error) {
+      console.error("Error transferring USDC:", error);
+      return res.status(500).json({ error: (error as Error).message });
+    }
+  } catch (error) {
+    console.error("Error in /withdraw route:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Health check endpoint for Caddy
+app.get("/health", (req, res) => {
+  res.status(200).send("OK");
 });
 
 app.listen(port, () => {
